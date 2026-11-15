@@ -245,7 +245,7 @@ export default class Automations extends View {
     const count = this.list ? this.list.automations.length + this.list.invalid.length : 0;
     const waiting = this.runs.filter((r) => FINISHED.has(r.status) && !r.seen).length;
     const subtitle = !this.list ? "Loading automations…" : count
-      ? `${count} ${count === 1 ? "automation" : "automations"} · ${waiting} finished ${waiting === 1 ? "run" : "runs"} waiting for review`
+      ? `${count} ${count === 1 ? "automation" : "automations"} · ${waiting ? `${waiting} finished ${waiting === 1 ? "run" : "runs"} waiting for review` : "nothing waiting for review"}`
       : "No automations yet. + creates one.";
     return v_flex().flex_none().px(30).pt(24).pb(18).gap(16).bg(t.chrome).border_b(1).border_color(t.border)
       .child(h_flex().gap(12).items_center()
