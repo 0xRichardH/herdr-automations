@@ -362,9 +362,10 @@ export default class Automations extends View {
 
   renderForm(t, cx) {
     const f = this.form;
-    const label = (s) => div().pt(6).text_size(11).font_semibold().text_color(t.dim).child(s);
-    const input = (id, state) => div().id(id).min_w(0).h(34).px(10).flex().items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
+    const label = (s) => div().text_size(11).line_height("12px").font_semibold().text_color(t.dim).child(s);
+    const input = (id, state) => div().id(id).min_w(0).h(26).px(10).flex().items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(state).h_full().w_full().text_size(12));
+    const field = (name, control) => v_flex().min_w(0).gap(2).child(label(name)).child(control);
     const cron = f.cron.value().trim();
     const presets = [...PRESETS.map(([l, c]) => [c, l]), ["custom", "Custom"]];
     const preset = PRESETS.some(([, c]) => c === cron) ? cron : "custom";
@@ -373,30 +374,31 @@ export default class Automations extends View {
     const agents = [...offered.map((a) => [a, a]), ...(this.templates ?? []).map((tp) => [`template:${tp.name}`, `${tp.name} (template)`])];
     const agentValue = f.template ? `template:${f.template}` : f.agent;
     const res = f.result;
-    return v_flex().w_full().max_w(640).min_w(0).p(16).gap(8).rounded(11).bg(t.surface).border_1().border_color(t.border)
-      .child(div().text_size(15).font_medium().child(f.original ? `Edit ${f.original}` : "New automation"))
-      .child(label("NAME")).child(input("f-name", f.name))
-      .child(label("SCHEDULE")).child(this.pills("f-preset", presets, preset, t, (v, cx) => { if (v !== "custom") f.cron.set_value(v); this.preview(cx); cx.notify(); }))
-      .child(input("f-cron", f.cron))
-      .child(label("REPO")).child(h_flex().gap(6).child(div().flex_1().min_w(0).child(input("f-repo", f.repo)))
+    const left = v_flex().flex_1().min_w(0).flex_basis(320).gap(4)
+      .child(field("NAME", input("f-name", f.name)))
+      .child(field("SCHEDULE", v_flex().min_w(0).gap(2)
+        .child(this.pills("f-preset", presets, preset, t, (v, cx) => { if (v !== "custom") f.cron.set_value(v); this.preview(cx); cx.notify(); }))
+        .child(input("f-cron", f.cron))))
+      .child(field("REPO", h_flex().gap(6).child(div().flex_1().min_w(0).child(input("f-repo", f.repo)))
         .child(this.button("f-pick", "Choose…", t, (cx) => cx.spawn(async (cx) => {
           const dir = await pickFolder({ prompt: "Repository for this automation" });
           if (dir) { f.repo.set_value(tilde(dir)); this.preview(cx); }
           cx.notify();
-        }), { h: 30 })))
-      .child(label("RUNS IN")).child(this.pills("f-ws", WORKSPACES, f.workspace, t, (v, cx) => { f.workspace = v; this.preview(cx); cx.notify(); }))
+        }), { h: 30 }))))
+      .child(field("RUNS IN", this.pills("f-ws", WORKSPACES, f.workspace, t, (v, cx) => { f.workspace = v; this.preview(cx); cx.notify(); })))
       .when(f.workspace === "existing", (el) => el.child(this.pills("f-space",
         spaces().filter((s) => !s.machine).map((s) => [s.id, s.name]), f.workspace_id, t,
         (v, cx) => { f.workspace_id = v; this.preview(cx); cx.notify(); })))
-      .child(label("AGENT")).child(this.pills("f-agent", agents, agentValue, t, (v, cx) => {
+      .child(field("AGENT", this.pills("f-agent", agents, agentValue, t, (v, cx) => {
         if (v.startsWith("template:")) { f.template = v.slice(9); f.agent = ""; } else { f.template = ""; f.agent = v; }
         this.preview(cx); cx.notify();
-      }))
-      .when(!f.template, (el) => el.child(label("MODEL")).child(input("f-model", f.model)))
-      .child(label("PROMPT")).child(div().id("f-prompt").min_w(0).p(10).rounded(7).bg(t.background).border_1().border_color(t.input)
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(f.prompt).w_full().text_size(12)))
-      .child(label("TIMEOUT (MINUTES)")).child(input("f-timeout", f.timeout))
-      .child(label("MCP CONFIG")).child(input("f-mcp", f.mcp))
+      })))
+      .when(!f.template, (el) => el.child(field("MODEL", input("f-model", f.model))))
+      .child(field("TIMEOUT (MINUTES)", input("f-timeout", f.timeout)))
+      .child(field("MCP CONFIG", input("f-mcp", f.mcp)));
+    const right = v_flex().flex_1().min_w(0).flex_basis(320).gap(4)
+      .child(field("PROMPT", div().id("f-prompt").min_w(0).h(340).p(10).rounded(7).bg(t.background).border_1().border_color(t.input)
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(f.prompt).w_full().h_full().text_size(12))))
       .child(div().pt(8).whitespace_normal().text_size(12)
         .when(Boolean(res?.problem), (el) => el.text_color(t.ansi1).child(res.problem))
         .when(Boolean(res && !res.problem && res.next), (el) => el.text_color(t.muted)
@@ -404,5 +406,8 @@ export default class Automations extends View {
       .child(h_flex().pt(8).gap(8).justify_end()
         .child(this.button("f-cancel", "Cancel", t, (cx) => { this.view = f.original ? { kind: "detail", name: f.original } : { kind: "list" }; this.form = null; cx.notify(); }))
         .child(this.button("f-save", "Save", t, (cx) => this.save(cx), { solid: true })));
+    return v_flex().w_full().max_w(940).min_w(0).p(18).gap(16).rounded(11).bg(t.surface).border_1().border_color(t.border)
+      .child(div().text_size(17).line_height("20px").font_medium().child(f.original ? `Edit ${f.original}` : "New automation"))
+      .child(h_flex().w_full().min_w(0).flex_wrap().gap(24).items_start().child(left).child(right));
   }
 }
