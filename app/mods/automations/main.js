@@ -215,7 +215,7 @@ export default class Automations extends View {
         .child(h_flex().w_full().min_w(0).justify_center().child(body)))
       .child(h_flex().flex_none().h(34).px(30).gap(8).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
         .child(div().flex_1().child(`${count} ${count === 1 ? "automation" : "automations"} · ${this.runs.length} ${this.runs.length === 1 ? "run" : "runs"}`))
-        .child(div().child("Click a card to open its run · Ctrl+Shift+A")));
+        .child(div().child("Click a card to open it · Esc to close")));
   }
 
   button(id, label, t, onClick, opts = {}) {
