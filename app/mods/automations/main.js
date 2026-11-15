@@ -1,12 +1,10 @@
-// Automations: scheduled agent prompts (herdr-automations), as a side panel.
-//
 // Everything goes through the herdr-automations CLI (`… --json`): this mod
 // never reads or writes automations.yaml or history.jsonl itself. The files
 // are watched only to know when to ask again.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { exec, hc, home, theme, terminals, spaces, run, notify, pickFolder, watchFolder, knownAgents } from "herdr";
+import { exec, hc, home, theme, settings, terminals, spaces, run, notify, pickFolder, watchFolder, knownAgents, props, closeOverlay } from "herdr";
 
 const PRESETS = [
   ["Hourly", "0 * * * *"],
@@ -17,7 +15,7 @@ const PRESETS = [
 ];
 // The agents hc can hand a prompt to and watch to the end (config.KindTakesPromptArg).
 // The form offers the ones installed here.
-const AGENTS = ["claude", "codex", "pi", "copilot"];
+const AGENTS = ["claude", "codex", "pi", "copilot", "grok"];
 const WORKSPACES = [["worktree", "New worktree"], ["root", "Repo root"], ["existing", "Existing space"]];
 const FINISHED = new Set(["done", "failed", "cancelled"]);
 
@@ -52,6 +50,7 @@ export default class Automations extends View {
     this.error = null; this.note = null;
     this.known = null; // run ids already seen by this copy, to toast only new failures
     this.handle = cx.focus_handle();
+    if (props()?.overlay) this.handle.focus();
     cx.spawn(async (cx) => {
       this.bin = await this.locate();
       await this.refresh(cx);
@@ -197,30 +196,41 @@ export default class Automations extends View {
   // ---- render ----
 
   render(cx) {
-    const t = theme();
+    const t = { ...theme(), ...(settings().dark ? { blocked: "#e8ad68", working: "#86b6f2", done: "#98c798" } : { blocked: "#92551a", working: "#285fa0", done: "#376d36" }) };
     const body = this.view.kind === "form" && this.form ? this.renderForm(t, cx)
       : this.view.kind === "detail" ? this.renderDetail(t, cx) : this.renderList(t, cx);
-    return v_flex().id("automations").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background)
-      .border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
+    const count = this.list ? this.list.automations.length + this.list.invalid.length : 0;
+    return v_flex().id("automations").size_full().min_h(0).overflow_hidden().bg(t.canvas)
+      .text_color(t.foreground).text_size(13).track_focus(this.handle)
+      .on_key_down((e, cx) => {
+        if (e.key !== "escape") return;
+        const overlay = props()?.overlay;
+        if (overlay) closeOverlay(overlay);
+        else if (this.view.kind !== "list") { this.view = { kind: "list" }; this.form = null; cx.notify(); }
+        cx.stop_propagation();
+      })
       .child(this.header(t, cx))
-      .when(Boolean(this.list && !this.list.scheduler), (el) => el.child(this.banner(t, cx)))
-      .when(Boolean(this.error || this.note), (el) => el.child(div().px(14).py(6).text_size(12).text_color(t.ansi1).child(this.error || this.note)))
-      .child(div().id("automations-body").flex_1().min_h(0).overflow_y_scrollbar().child(body));
+      .when(Boolean(this.error || this.note), (el) => el.child(div().flex_none().px(30).py(6).text_size(12).text_color(t.ansi1).child(this.error || this.note)))
+      .child(v_flex().id("automations-body").flex_1().min_h(0).overflow_y_scrollbar().px(30).py(24)
+        .child(h_flex().w_full().min_w(0).justify_center().child(body)))
+      .child(h_flex().flex_none().h(34).px(30).gap(8).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
+        .child(div().flex_1().child(`${count} ${count === 1 ? "automation" : "automations"} · ${this.runs.length} ${this.runs.length === 1 ? "run" : "runs"}`))
+        .child(div().child("Click a card to open its run · Ctrl+Shift+A")));
   }
 
   button(id, label, t, onClick, opts = {}) {
-    return h_flex().id(id).h(opts.h ?? 26).px(opts.px ?? 9).flex_none().items_center().justify_center().rounded(7).text_size(12)
+    return h_flex().id(id).h(opts.h ?? 28).px(opts.px ?? 9).flex_none().items_center().justify_center().rounded(16).text_size(12)
       .bg(opts.solid ? t.solid : t.raised).text_color(opts.solid ? t.solid_foreground : opts.danger ? t.ansi1 : t.foreground)
       .border_1().border_color(opts.solid ? t.solid : t.border).cursor_pointer().hover((s) => s.opacity(0.85))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => onClick(cx)).child(label);
   }
 
   pills(id, options, value, t, pick) {
-    return h_flex().flex_wrap().gap(5).children(options.map(([v, label]) =>
-      h_flex().id(`${id}-${v}`).h(24).px(8).items_center().rounded(6).text_size(12).cursor_pointer()
+    return h_flex().min_w(0).flex_wrap().gap(7).children(options.map(([v, label]) =>
+      h_flex().id(`${id}-${v}`).h(28).px(9).max_w_full().min_w(0).items_center().rounded(7).text_size(12).cursor_pointer()
         .bg(v === value ? t.selected : t.raised).text_color(v === value ? t.foreground : t.muted)
         .border_1().border_color(v === value ? t.accent : t.border).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => pick(v, cx)).child(label)));
+        .on_click((_e, cx) => pick(v, cx)).child(div().min_w(0).truncate().child(label))));
   }
 
   switch_(id, on, t, toggle) {
@@ -232,20 +242,27 @@ export default class Automations extends View {
   header(t, cx) {
     const paused = Boolean(this.list?.paused);
     const back = this.view.kind !== "list";
-    return h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-      .when(back, (el) => el.child(this.button("back", "‹", t, (cx) => { this.view = { kind: "list" }; this.form = null; cx.notify(); }, { px: 7 })))
-      .child(div().font_semibold().child("Automations"))
-      .child(div().flex_1())
-      .when(Boolean(this.list), (el) => el
-        .child(div().text_size(11).text_color(paused ? t.blocked : t.dim).child(paused ? "All paused" : "Active"))
-        .child(this.switch_("pause-all", !paused, t, (cx) => this.act(cx, [paused ? "resume" : "pause", "--all"]))))
-      .when(!back, (el) => el.child(this.button("new", "+", t, (cx) => this.edit(null, cx), { px: 8 })));
+    const count = this.list ? this.list.automations.length + this.list.invalid.length : 0;
+    const waiting = this.runs.filter((r) => FINISHED.has(r.status) && !r.seen).length;
+    const subtitle = !this.list ? "Loading automations…" : count
+      ? `${count} ${count === 1 ? "automation" : "automations"} · ${waiting} finished ${waiting === 1 ? "run" : "runs"} waiting for review`
+      : "No automations yet. + creates one.";
+    return v_flex().flex_none().px(30).pt(24).pb(18).gap(16).bg(t.chrome).border_b(1).border_color(t.border)
+      .child(h_flex().gap(12).items_center()
+        .when(back, (el) => el.child(this.button("back", "‹", t, (cx) => { this.view = { kind: "list" }; this.form = null; cx.notify(); }, { px: 11, h: 32 })))
+        .child(div().flex_1().min_w(0).truncate().text_size(26).font_semibold().child("Automations"))
+        .when(Boolean(this.list), (el) => el.child(h_flex().h(32).px(12).gap(10).items_center().rounded(16).bg(t.raised).border_1().border_color(t.border)
+          .child(div().text_size(12).text_color(paused ? t.blocked : t.muted).child(paused ? "All paused" : "Active"))
+          .child(this.switch_("pause-all", !paused, t, (cx) => this.act(cx, [paused ? "resume" : "pause", "--all"])))))
+        .when(!back, (el) => el.child(this.button("new", "+", t, (cx) => this.edit(null, cx), { px: 12, h: 32 }))))
+      .child(div().text_size(13).text_color(t.muted).child(subtitle))
+      .when(Boolean(this.list && !this.list.scheduler), (el) => el.child(this.banner(t, cx)));
   }
 
   banner(t, cx) {
-    return h_flex().px(14).py(8).gap(8).items_center().bg(t.blocked + "22").border_b(1).border_color(t.border)
-      .child(div().flex_1().text_size(12).child("Scheduler stopped: nothing will run on time."))
-      .child(this.button("start", "Start", t, (cx) => this.act(cx, ["service", "install"]), { solid: true }));
+    return h_flex().gap(12).items_center().text_color(t.muted)
+      .child(div().flex_1().text_size(13).child("Scheduler stopped: nothing will run on time."))
+      .child(this.button("start", "Start", t, (cx) => this.act(cx, ["service", "install"]), { solid: true, h: 32, px: 14 }));
   }
 
   dot(a, t) {
@@ -258,34 +275,42 @@ export default class Automations extends View {
   renderList(t, cx) {
     if (!this.list) return div().p(14).text_color(t.dim).child(this.error ? "" : "Loading…");
     const inbox = this.runs.filter((r) => FINISHED.has(r.status) && !r.seen).slice(0, 20);
-    const section = (label, n) => h_flex().px(14).pt(12).pb(4).gap(6).items_center().text_size(11).font_semibold().text_color(t.dim)
-      .child(label).when(n > 0, (el) => el.child(div().px(5).rounded(4).bg(t.raised).child(String(n))));
-    const col = v_flex().pb(10);
-    col.child(section("INBOX", inbox.length).when(inbox.length > 0, (el) => el.child(div().flex_1())
-      .child(div().id("seen-all").font_normal().cursor_pointer().hover((s) => s.text_color(t.foreground))
-        .on_click((_e, cx) => this.act(cx, ["seen", "--all"])).child("Mark all read"))));
-    if (!inbox.length) col.child(div().px(14).py(4).text_size(12).text_color(t.dim).child("Nothing new."));
-    for (const r of inbox) col.child(this.inboxRow(r, t));
-    col.child(section("AUTOMATIONS", 0));
+    const section = (label, n, color, hint, unread = false) => v_flex().gap(7).pb(10).border_b(2).border_color(color)
+      .child(h_flex().gap(8).items_center()
+        .child(div().size(7).rounded(4).flex_none().bg(color))
+        .child(div().flex_1().min_w(0).text_size(16).font_medium().child(label))
+        .when(unread, (el) => el.child(this.button("seen-all", "Mark all read", t, (cx) => this.act(cx, ["seen", "--all"]), { px: 7, h: 26 })))
+        .child(div().px(6).rounded(7).bg(t.raised).text_size(12).text_color(n > 0 ? color : t.muted).child(String(n))))
+      .child(div().text_size(12).text_color(t.muted).truncate().child(hint));
+    const empty = (glyph, text) => v_flex().p(16).gap(10).rounded(11).bg(t.surface).border_1().border_color(t.border)
+      .child(div().text_size(18).text_color(t.dim).child(glyph))
+      .child(div().whitespace_normal().text_size(12).text_color(t.muted).child(text));
+    const inboxLane = v_flex().flex_1().min_w(0).gap(16)
+      .child(section("INBOX", inbox.length, t.blocked, "Finished runs waiting for your review.", inbox.length > 0));
+    if (!inbox.length) inboxLane.child(empty("✓", "Nothing new."));
+    for (const r of inbox) inboxLane.child(this.inboxRow(r, t));
+    const automationLane = v_flex().flex_1().min_w(0).gap(16)
+      .child(section("AUTOMATIONS", this.list.automations.length + this.list.invalid.length, t.working, "Scheduled prompts for your agents."));
     if (!this.list.automations.length && !this.list.invalid.length)
-      col.child(div().px(14).py(4).text_size(12).text_color(t.dim).child("None yet. + creates one."));
-    for (const a of this.list.automations) col.child(this.row(a, t));
-    for (const d of this.list.invalid) col.child(v_flex().mx(8).my(2).px(8).py(6).rounded(7).bg(t.ansi1 + "18")
-      .child(div().text_size(12).font_semibold().child(d.name || `line ${d.line}`))
-      .child(div().text_size(11).text_color(t.muted).child(d.message)));
+      automationLane.child(empty("+", "None yet. + creates one."));
+    for (const a of this.list.automations) automationLane.child(this.row(a, t));
+    for (const d of this.list.invalid) automationLane.child(v_flex().min_w(0).p(16).gap(8).rounded(11).bg(t.ansi1 + (settings().dark ? "18" : "0c")).border_1().border_color(t.ansi1)
+      .child(div().text_size(16).font_medium().child(d.name || `line ${d.line}`))
+      .child(div().whitespace_normal().text_size(12).text_color(t.ansi1).child(d.message)));
+    const col = h_flex().w_full().min_w(0).gap(22).items_start().child(inboxLane).child(automationLane);
     return col;
   }
 
   inboxRow(r, t) {
     const ok = r.status === "done", color = ok ? t.ansi2 : r.status === "failed" ? t.ansi1 : t.dim;
-    return v_flex().id(`inbox-${r.run_id}`).mx(8).px(8).py(6).gap(2).rounded(7).cursor_pointer().hover((s) => s.bg(t.hover))
+    return v_flex().id(`inbox-${r.run_id}`).min_w(0).p(16).gap(9).rounded(11).bg(t.surface).border_1().border_color(r.status === "failed" ? t.ansi1 : t.border).cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => this.open(r, cx))
       .child(h_flex().gap(6).items_center()
         .child(div().size(7).rounded(4).flex_none().bg(color))
-        .child(div().flex_1().min_w(0).truncate().child(r.automation))
-        .child(div().text_size(11).text_color(color).child(r.status))
-        .child(div().text_size(11).text_color(t.dim).child(ago(r.at))))
-      .child(div().pl(13).text_size(11).text_color(t.muted).truncate()
+        .child(div().flex_1().min_w(0).truncate().text_size(16).font_medium().child(r.automation))
+        .child(div().text_size(12).text_color(color).child(r.status))
+        .child(div().text_size(12).text_color(t.muted).child(ago(r.at))))
+      .child(div().pl(13).text_size(12).text_color(t.muted).truncate()
         .child(r.error || `${duration(r.seconds)}${r.terminal && this.live(r.terminal) ? " · open" : ""}`));
   }
 
@@ -293,12 +318,13 @@ export default class Automations extends View {
     const live = this.liveFor(a.name);
     const sub = live ? `running · ${live.status ?? "starting"}` : a.disabled ? "paused"
       : `${human(a.cron)} · ${this.list.paused ? "held" : until(a.next)}`;
-    return v_flex().id(`auto-${a.name}`).mx(8).px(8).py(7).gap(2).rounded(7).cursor_pointer().hover((s) => s.bg(t.hover))
+    const attention = live?.status === "blocked" ? t.blocked : a.last?.status === "failed" || a.last?.status === "missed" ? t.ansi1 : t.border;
+    return v_flex().id(`auto-${a.name}`).min_w(0).p(16).gap(9).rounded(11).bg(t.surface).border_1().border_color(attention).cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => { this.view = { kind: "detail", name: a.name }; cx.notify(); })
-      .child(h_flex().gap(7).items_center().child(this.dot(a, t)).child(div().flex_1().min_w(0).truncate().font_semibold().child(a.name))
-        .child(this.button(`run-${a.name}`, "▶", t, (cx) => this.act(cx, ["run", a.name, "--bg"]), { px: 6, h: 22 })))
-      .child(div().pl(15).text_size(11).text_color(t.muted).truncate().child(sub))
-      .child(div().pl(15).text_size(11).text_color(t.dim).truncate().child(`${a.template ? "template " + a.template : a.agent + (a.model ? " · " + a.model : "")} · ${a.workspace}`));
+      .child(h_flex().gap(7).items_center().child(this.dot(a, t)).child(div().flex_1().min_w(0).truncate().text_size(16).font_medium().child(a.name))
+        .child(this.button(`run-${a.name}`, "Run", t, (cx) => this.act(cx, ["run", a.name, "--bg"]), { px: 9, h: 28 })))
+      .child(div().pl(15).text_size(12).text_color(t.muted).truncate().child(sub))
+      .child(div().pl(15).text_size(12).text_color(t.muted).truncate().child(`${a.template ? "template " + a.template : a.agent + (a.model ? " · " + a.model : "")} · ${a.workspace}`));
   }
 
   renderDetail(t, cx) {
@@ -307,7 +333,7 @@ export default class Automations extends View {
     const runs = this.runs.filter((r) => r.automation === a.name && r.status !== "scheduled").slice(0, 30);
     const kv = (k, v) => h_flex().gap(8).text_size(12).child(div().w(78).flex_none().text_color(t.dim).child(k)).child(div().flex_1().min_w(0).truncate().child(v || "—"));
     const deleting = this.deleting === a.name;
-    return v_flex().p(14).gap(10)
+    return v_flex().w_full().max_w(640).min_w(0).gap(12)
       .child(h_flex().gap(8).items_center().child(this.dot(a, t)).child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(a.name)))
       .child(h_flex().gap(6).flex_wrap()
         .child(this.button("d-run", "Run now", t, (cx) => this.act(cx, ["run", a.name, "--bg"]), { solid: true }))
@@ -318,26 +344,26 @@ export default class Automations extends View {
           this.deleting = null;
           this.act(cx, ["rm", a.name], () => { this.view = { kind: "list" }; });
         }, { danger: true })))
-      .child(v_flex().gap(4)
+      .child(v_flex().min_w(0).p(13).gap(9).rounded(11).bg(t.surface).border_1().border_color(t.border)
         .child(kv("Schedule", `${human(a.cron)}${human(a.cron) !== a.cron ? ` (${a.cron})` : ""}`))
         .child(kv("Next", a.disabled ? "paused" : this.list.paused ? "held: all paused" : until(a.next)))
         .child(kv("Repo", tilde(a.repo)))
         .child(kv("Runs in", WORKSPACES.find(([w]) => w === a.workspace)?.[1] ?? a.workspace))
         .child(kv(a.template ? "Template" : "Agent", a.template || `${a.agent}${a.model ? " · " + a.model : ""}`)))
-      .child(div().p(8).rounded(7).bg(t.raised).text_size(12).text_color(t.muted).child(a.prompt || a.workflow || ""))
+      .child(div().p(13).rounded(11).bg(t.surface).border_1().border_color(t.border).whitespace_normal().text_size(12).text_color(t.muted).child(a.prompt || a.workflow || ""))
       .child(div().pt(4).text_size(11).font_semibold().text_color(t.dim).child("HISTORY"))
-      .children(runs.length ? runs.map((r) => h_flex().id(`h-${r.run_id}`).gap(8).px(6).py(4).rounded(6).items_center().cursor_pointer()
+      .children(runs.length ? runs.map((r) => h_flex().id(`h-${r.run_id}`).min_w(0).gap(8).p(12).rounded(11).bg(t.surface).border_1().border_color(t.border).items_center().cursor_pointer()
         .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(r, cx))
         .child(div().w(66).flex_none().text_size(11).text_color(r.status === "done" ? t.ansi2 : r.status === "failed" || r.status === "missed" ? t.ansi1 : t.muted).child(r.status))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(r.error || (r.seconds ? duration(r.seconds) : "")))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(ago(r.at))))
-        : [div().text_size(12).text_color(t.dim).child("No runs yet.")]);
+        : [div().p(13).rounded(11).bg(t.surface).border_1().border_color(t.border).text_size(12).text_color(t.muted).child("No runs yet.")]);
   }
 
   renderForm(t, cx) {
     const f = this.form;
     const label = (s) => div().pt(6).text_size(11).font_semibold().text_color(t.dim).child(s);
-    const input = (id, state) => div().id(id).h(30).px(9).flex().items_center().rounded(7).border_1().border_color(t.input).bg(t.surface ?? t.background)
+    const input = (id, state) => div().id(id).min_w(0).h(34).px(10).flex().items_center().rounded(7).border_1().border_color(t.input).bg(t.background)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(state).h_full().w_full().text_size(12));
     const cron = f.cron.value().trim();
     const presets = [...PRESETS.map(([l, c]) => [c, l]), ["custom", "Custom"]];
@@ -347,12 +373,12 @@ export default class Automations extends View {
     const agents = [...offered.map((a) => [a, a]), ...(this.templates ?? []).map((tp) => [`template:${tp.name}`, `${tp.name} (template)`])];
     const agentValue = f.template ? `template:${f.template}` : f.agent;
     const res = f.result;
-    return v_flex().p(14).gap(4)
-      .child(div().text_size(15).font_semibold().child(f.original ? `Edit ${f.original}` : "New automation"))
+    return v_flex().w_full().max_w(640).min_w(0).p(16).gap(8).rounded(11).bg(t.surface).border_1().border_color(t.border)
+      .child(div().text_size(15).font_medium().child(f.original ? `Edit ${f.original}` : "New automation"))
       .child(label("NAME")).child(input("f-name", f.name))
       .child(label("SCHEDULE")).child(this.pills("f-preset", presets, preset, t, (v, cx) => { if (v !== "custom") f.cron.set_value(v); this.preview(cx); cx.notify(); }))
       .child(input("f-cron", f.cron))
-      .child(label("REPO")).child(h_flex().gap(6).child(div().flex_1().child(input("f-repo", f.repo)))
+      .child(label("REPO")).child(h_flex().gap(6).child(div().flex_1().min_w(0).child(input("f-repo", f.repo)))
         .child(this.button("f-pick", "Choose…", t, (cx) => cx.spawn(async (cx) => {
           const dir = await pickFolder({ prompt: "Repository for this automation" });
           if (dir) { f.repo.set_value(tilde(dir)); this.preview(cx); }
@@ -367,11 +393,11 @@ export default class Automations extends View {
         this.preview(cx); cx.notify();
       }))
       .when(!f.template, (el) => el.child(label("MODEL")).child(input("f-model", f.model)))
-      .child(label("PROMPT")).child(div().id("f-prompt").p(8).rounded(7).border_1().border_color(t.input)
+      .child(label("PROMPT")).child(div().id("f-prompt").min_w(0).p(10).rounded(7).bg(t.background).border_1().border_color(t.input)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(f.prompt).w_full().text_size(12)))
       .child(label("TIMEOUT (MINUTES)")).child(input("f-timeout", f.timeout))
       .child(label("MCP CONFIG")).child(input("f-mcp", f.mcp))
-      .child(div().pt(8).text_size(12)
+      .child(div().pt(8).whitespace_normal().text_size(12)
         .when(Boolean(res?.problem), (el) => el.text_color(t.ansi1).child(res.problem))
         .when(Boolean(res && !res.problem && res.next), (el) => el.text_color(t.muted)
           .child(`Next: ${res.next.map((n) => until(n)).join(", ")}`)))
