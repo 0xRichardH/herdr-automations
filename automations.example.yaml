@@ -8,9 +8,11 @@ automations:
     # Optional: provision every run in this Herdr session, kept apart from the
     # ones you work in. It must be running; the plugin never starts it.
     session: automations
+    # Under backend: hc, claude, pi, copilot and grok are measured; codex is assumed.
+    # Grok takes a bare trailing prompt. Configure its MCP with grok mcp, not mcp_config.
     agent: claude
-    # Passed to the agent as --model. Leave it out and the agent picks for
-    # itself — which is how an unattended chore lands on a flagship model.
+    # Passed to the agent as --model (including grok). Leave it out and the
+    # agent picks for itself, which can put an unattended chore on a flagship model.
     model: sonnet
     prompt: |
       Triage new GitHub issues: label them, close duplicates,

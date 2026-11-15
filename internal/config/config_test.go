@@ -203,6 +203,9 @@ automations:
 		"model on a kind that takes none": `
 automations:
   - {name: a, cron: "@daily", repo: /x, prompt: p, agent: devin, model: opus}`,
+		"mcp_config on grok": `
+automations:
+  - {name: a, cron: "@daily", repo: /x, prompt: p, agent: grok, mcp_config: /tmp/x.json}`,
 		"no name": `
 automations:
   - {cron: "@daily", repo: /x, prompt: p}`,
@@ -451,20 +454,34 @@ func TestSaveKeepsBackendAndPause(t *testing.T) {
 }
 
 func TestHCRefusesAnAgentThatCannotTakeItsPrompt(t *testing.T) {
-	withConfig(t, `backend: hc
-automations:
-  - name: o
-    cron: "@daily"
-    repo: /x
-    prompt: p
-    agent: opencode
-`)
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		agent, extra, want string
+	}{
+		{"claude", "", ""},
+		{"codex", "", ""},
+		{"pi", "", ""},
+		{"copilot", "", ""},
+		{"grok", ", model: grok-code", ""},
+		{"grok", ", mcp_config: /tmp/x.json", "grok does not support mcp_config; configure MCP with grok mcp"},
+		{"opencode", "", "cannot take its prompt under backend: hc yet (claude, codex, pi, copilot and grok can)"},
 	}
-	if len(cfg.Invalid) != 1 || !strings.Contains(cfg.Invalid[0].Message, "cannot take its prompt") {
-		t.Fatalf("got %+v", cfg.Invalid)
+	for _, c := range cases {
+		t.Run(c.agent+c.extra, func(t *testing.T) {
+			withConfig(t, "backend: hc\nautomations:\n  - {name: o, cron: \"@daily\", repo: /x, prompt: p, agent: "+c.agent+c.extra+"}\n")
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.want == "" {
+				if len(cfg.Automations) != 1 || len(cfg.Invalid) != 0 {
+					t.Fatalf("expected an automation, got %+v", cfg)
+				}
+				return
+			}
+			if len(cfg.Invalid) != 1 || !strings.Contains(cfg.Invalid[0].Message, c.want) || len(cfg.Automations) != 0 {
+				t.Fatalf("want %q, got %+v", c.want, cfg)
+			}
+		})
 	}
 }
 

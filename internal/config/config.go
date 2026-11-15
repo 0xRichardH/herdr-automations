@@ -210,10 +210,13 @@ func (a *Automation) validate(backend Backend) error {
 		return fmt.Errorf("%s: template requires backend: hc", a.Name)
 	}
 	if a.Template == "" && backend == BackendHC && !KindTakesPromptArg(a.Agent) {
-		return fmt.Errorf("%s: agent %q cannot take its prompt under backend: hc yet (claude, codex, pi and copilot can)", a.Name, a.Agent)
+		return fmt.Errorf("%s: agent %q cannot take its prompt under backend: hc yet (claude, codex, pi, copilot and grok can)", a.Name, a.Agent)
 	}
 	if a.Workflow != "" && backend == BackendHC {
 		return fmt.Errorf("%s: workflow drives the Herdr TUI; it cannot run under backend: hc", a.Name)
+	}
+	if a.Agent == "grok" && a.MCPConfig != "" {
+		return fmt.Errorf("%s: grok does not support mcp_config; configure MCP with grok mcp", a.Name)
 	}
 	if a.Model != "" && !KindAcceptsModel(a.Agent) {
 		return fmt.Errorf("%s: agent %q takes no --model; put the flag it does take in agent_args", a.Name, a.Agent)
@@ -253,6 +256,9 @@ func KindAcceptsModel(kind string) bool { return modelFlagKinds[kind] }
 // also report their state to hc (OSC 7501), without which a run can't be told
 // done from stuck. Measured on 2026-10-30: claude, pi and copilot report;
 // opencode reports nothing; codex is assumed from its CLI, not measured.
+// Grok Build 1.0.87 takes a bare trailing prompt (grok --help). A Grok Build
+// session reports status over OSC 7501; the user's session is a working agent
+// in the app.
 // copilot needs -i: a bare argument is "Invalid command format", and -p would
 // exit after one answer. Herdr's TUI watches agents' screens itself, which is
 // why it supports more of them.
@@ -261,6 +267,7 @@ var promptFlags = map[string]string{
 	"codex":   "",
 	"pi":      "",
 	"copilot": "-i",
+	"grok":    "",
 }
 
 // KindTakesPromptArg reports whether this agent kind takes its prompt on its
