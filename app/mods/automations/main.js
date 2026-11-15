@@ -2,9 +2,10 @@
 // never reads or writes automations.yaml or history.jsonl itself. The files
 // are watched only to know when to ask again.
 
+import * as fs from "fs/promises";
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { exec, hc, home, theme, settings, terminals, spaces, run, notify, pickFolder, watchFolder, knownAgents, props, closeOverlay } from "herdr";
+import { exec, hc, home, theme, settings, terminals, spaces, run, notify, pickFolder, watchFolder, knownAgents, props, closeOverlay, nextCommand } from "herdr";
 
 const PRESETS = [
   ["Hourly", "0 * * * *"],
@@ -16,6 +17,36 @@ const PRESETS = [
 // The agents hc can hand a prompt to and watch to the end (config.KindTakesPromptArg).
 // The form offers the ones installed here.
 const AGENTS = ["claude", "codex", "pi", "copilot", "grok"];
+const MODEL_LOADERS = {
+  grok: async () => {
+    const r = await exec("grok", ["models"]);
+    if (r.code !== 0) return [];
+    const defaultId = r.stdout.match(/^Default model:\s*(\S+)/m)?.[1];
+    return r.stdout.split("\n").flatMap((line) => {
+      const match = line.match(/^\s+[-*]\s+(\S+)(?:\s+\(default\))?\s*$/);
+      return match ? [{ id: match[1], detail: match[1] === defaultId || line.includes("(default)") ? "Default" : "" }] : [];
+    });
+  },
+  codex: async () => {
+    const config = await fs.readFile(`${home()}/.codex/config.toml`, "utf8");
+    const match = config.match(/^\s*model_catalog_json\s*=\s*(?:"([^"\n]+)"|'([^'\n]+)'|([^#\s]+))/m);
+    if (!match) return [];
+    let path = match[1] ?? match[2] ?? match[3];
+    if (path.startsWith("~/")) path = home() + path.slice(1);
+    const catalog = JSON.parse(await fs.readFile(path, "utf8"));
+    return (catalog.models ?? []).map((m) => ({
+      id: m.id ?? m.slug,
+      detail: [m.display_name ?? m.name, (m.supported_reasoning_levels ?? []).map((level) => level.effort).join(", ")].filter(Boolean).join(" · "),
+    })).filter((m) => typeof m.id === "string" && m.id.length > 0);
+  },
+  pi: async () => {
+    const catalog = JSON.parse(await fs.readFile(`${home()}/.pi/agent/models.json`, "utf8"));
+    return Object.entries(catalog.providers ?? {}).flatMap(([provider, data]) =>
+      (data.models ?? []).filter((m) => typeof m.id === "string" && m.id.length > 0)
+        .map((m) => ({ id: `${provider}/${m.id}`, detail: m.name ?? "" })));
+  },
+  claude: async () => ["sonnet", "opus", "haiku"].map((id) => ({ id, detail: "" })),
+};
 const WORKSPACES = [["worktree", "New worktree"], ["root", "Repo root"], ["existing", "Existing space"]];
 const FINISHED = new Set(["done", "failed", "cancelled"]);
 
@@ -51,6 +82,7 @@ export default class Automations extends View {
     this.known = null; // run ids already seen by this copy, to toast only new failures
     this.handle = cx.focus_handle();
     if (props()?.overlay) this.handle.focus();
+    cx.spawn(async (cx) => { for (;;) { if ((await nextCommand())?.name === "focus") this.handle.focus(); } });
     cx.spawn(async (cx) => {
       this.bin = await this.locate();
       await this.refresh(cx);
@@ -140,9 +172,12 @@ export default class Automations extends View {
       model: field(a.model, "agent default"), timeout: field(String(a.timeout_minutes ?? 60), "60"),
       mcp: field(tilde(a.mcp_config), "optional: path to an MCP servers JSON"),
       prompt: TextareaState.new({ placeholder: "What should the agent do each time?", value: a.prompt ?? "" }),
-      result: null, seq: 0,
+      result: null, seq: 0, models: new Map(), modelPicker: false,
+      modelFilter: InputState.new({ placeholder: "Type to filter" }),
     };
     this.form.prompt.set_auto_grow(4, 12);
+    this.form.modelFilter.on("change", (_e, cx) => cx.notify());
+    this.form.modelFilter.on("submit", (_e, cx) => this.pickModel(cx));
     this.form.prompt.on("change", (_e, cx) => this.preview(cx));
     this.view = { kind: "form" };
     cx.spawn(async (cx) => {
@@ -150,7 +185,36 @@ export default class Automations extends View {
       try { this.installed = (await knownAgents()).filter((a) => a.installed).map((a) => a.key); } catch { this.installed = null; }
       cx.notify();
     });
+    this.loadModels(cx);
     this.preview(cx);
+  }
+
+  modelMatches(f) {
+    const query = f.modelFilter.value().trim().toLowerCase();
+    return (f.models.get(f.agent) ?? [])
+      .filter((m) => `${m.id} ${m.detail}`.toLowerCase().includes(query)).slice(0, 200);
+  }
+
+  pickModel(cx) {
+    const f = this.form;
+    if (!f?.modelPicker) return;
+    const pick = this.modelMatches(f)[0];
+    if (!pick) return;
+    f.model.set_value(pick.id); f.modelPicker = false; f.model.focus(); this.preview(cx); cx.notify();
+  }
+
+  loadModels(cx) {
+    const f = this.form, agent = f.agent;
+    if (f.models.has(agent)) return;
+    const loader = MODEL_LOADERS[agent];
+    if (!loader) { f.models.set(agent, []); return; }
+    f.models.set(agent, null);
+    cx.spawn(async (cx) => {
+      let models;
+      try { models = await loader(); } catch { models = []; }
+      f.models.set(agent, models);
+      if (this.form === f) cx.notify();
+    });
   }
 
   entry() {
@@ -203,6 +267,12 @@ export default class Automations extends View {
     return v_flex().id("automations").size_full().min_h(0).overflow_hidden().bg(t.canvas)
       .text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
+        const f = this.view.kind === "form" ? this.form : null;
+        if (f?.modelPicker) {
+          if (e.key === "escape") { f.modelPicker = false; f.model.focus(); cx.notify(); cx.stop_propagation(); return; }
+          if (e.key === "enter") { this.pickModel(cx); cx.stop_propagation(); return; }
+          return;
+        }
         if (e.key !== "escape") return;
         const overlay = props()?.overlay;
         if (overlay) closeOverlay(overlay);
@@ -374,6 +444,8 @@ export default class Automations extends View {
     const agents = [...offered.map((a) => [a, a]), ...(this.templates ?? []).map((tp) => [`template:${tp.name}`, `${tp.name} (template)`])];
     const agentValue = f.template ? `template:${f.template}` : f.agent;
     const res = f.result;
+    const models = f.models.get(f.agent) ?? [];
+    const matches = this.modelMatches(f);
     const left = v_flex().flex_1().min_w(0).flex_basis(320).gap(4)
       .child(field("NAME", input("f-name", f.name)))
       .child(field("SCHEDULE", v_flex().min_w(0).gap(2)
@@ -391,9 +463,33 @@ export default class Automations extends View {
         (v, cx) => { f.workspace_id = v; this.preview(cx); cx.notify(); })))
       .child(field("AGENT", this.pills("f-agent", agents, agentValue, t, (v, cx) => {
         if (v.startsWith("template:")) { f.template = v.slice(9); f.agent = ""; } else { f.template = ""; f.agent = v; }
-        this.preview(cx); cx.notify();
+        f.modelPicker = false; this.loadModels(cx); this.preview(cx); cx.notify();
       })))
-      .when(!f.template, (el) => el.child(field("MODEL", input("f-model", f.model))))
+      .when(!f.template, (el) => el.child(field("MODEL", v_flex().min_w(0).gap(4)
+        .child(h_flex().min_w(0).gap(6).items_center()
+          .child(div().flex_1().min_w(0).child(input("f-model", f.model)))
+          .when(models === null, (el) => el.child(div().text_size(11).text_color(t.muted).child("Loading models…")))
+          .when(Boolean(models?.length), (el) => el.child(this.button("f-model-choose", "Choose…", t, (cx) => {
+            f.modelPicker = !f.modelPicker;
+            if (f.modelPicker) {
+              f.modelFilter.set_value("");
+              for (const ms of [0, 250, 600]) cx.timer.after(ms, () => { if (this.form === f && f.modelPicker) f.modelFilter.focus(); });
+            } else f.model.focus();
+            cx.notify();
+          }, { h: 30 }))))
+        .when(f.modelPicker && Boolean(models?.length), (el) => el.child(v_flex().id("f-model-picker").absolute().left(0).right(0).bottom(30).h(300).min_w(0).p(8).gap(6).rounded(9).border_1().border_color(t.border).bg(t.canvas).shadow_2xl()
+          .child(h_flex().gap(6).items_center().text_size(11).text_color(t.dim)
+            .child(div().flex_1().child(`${f.agent} models`))
+            .child(div().child(`${matches.length} of ${models.length} · Enter picks the first`))
+            .child(this.button("f-model-done", "Close", t, (cx) => { f.modelPicker = false; f.model.focus(); cx.notify(); }, { h: 24 })))
+          .child(input("f-model-filter", f.modelFilter))
+          .child(v_flex().id("f-model-options").flex_1().min_h(0).min_w(0).overflow_y_scrollbar()
+            .children(matches.map((m) => v_flex().id(`f-model-option-${m.id}`).flex_none().min_w(0).px(8).py(6).gap(2).rounded(5).cursor_pointer().hover((s) => s.bg(t.hover))
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => { f.model.set_value(m.id); f.modelPicker = false; f.model.focus(); this.preview(cx); cx.notify(); })
+              .child(div().text_size(12).truncate().child(m.id))
+              .when(Boolean(m.detail), (el) => el.child(div().text_size(11).text_color(t.muted).truncate().child(m.detail)))))
+            .when(matches.length === 0, (el) => el.child(div().p(8).text_size(12).text_color(t.muted).child("No matching models.")))))))))
       .child(field("TIMEOUT (MINUTES)", input("f-timeout", f.timeout)))
       .child(field("MCP CONFIG", input("f-mcp", f.mcp)));
     const right = v_flex().flex_1().min_w(0).flex_basis(320).gap(4)
